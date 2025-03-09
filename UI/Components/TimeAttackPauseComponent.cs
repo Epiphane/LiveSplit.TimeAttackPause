@@ -1,16 +1,16 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 using System.Xml;
+using IrcDotNet.Collections;
 using LiveSplit.Model;
-using LiveSplit.TimeAttackPause.IO;
 using LiveSplit.TimeAttackPause.UI.Components;
 
 namespace LiveSplit.UI.Components
 {
-    public class TimeAttackPauseComponent : ControlComponent
+    public class TimeAttackPauseComponent : LogicComponent
     {
+        private const string kComparisonName = "TimeAttackPause_Ongoing";
         private TimeAttackPauseSettings Settings { get; set; }
 
         private ITimerModel Model { get; set; }
@@ -20,81 +20,57 @@ namespace LiveSplit.UI.Components
 
         public override string ComponentName => "TimeAttackPause";
 
-        public override float HorizontalWidth => 0;
-        public override float MinimumWidth => 0;
-        public override float VerticalHeight => 0;
-        public override float MinimumHeight => 0;
-
         // This function is called when LiveSplit creates your component. This happens when the
         // component is added to the layout, or when LiveSplit opens a layout with this component
         // already added.
-        public TimeAttackPauseComponent(LiveSplitState state) : this(state, CreateFormControl())
-        {
-            ContextMenuControls = new Dictionary<string, Action>();
-            ContextMenuControls.Add("Export current run", ExportCurrentRun);
-            ContextMenuControls.Add("Import run", ImportRun);
-        }
-
-        private static Control CreateFormControl()
-        {
-            // not used anymore
-            return new FlowLayoutPanel
-            {
-                Size = new Size(0, 0),
-                Location = new Point(0, 0),
-            };
-        }
-
-        private TimeAttackPauseComponent(LiveSplitState state, Control formControl) : base(state, formControl,
-            ex => ErrorCallback(state.Form, ex))
+        public TimeAttackPauseComponent(LiveSplitState state)
         {
             Settings = new TimeAttackPauseSettings();
-            Model = new TimerModel() { CurrentState = state };
 
             CurrentState = state;
+            if (!CurrentState.Run.CustomComparisons.Contains(kComparisonName))
+            {
+                CurrentState.Run.CustomComparisons.Add(kComparisonName);
+            }
+
+            CurrentState.OnReset += state_OnReset;
+
+            Model = new TimerModel() { CurrentState = state };
+            InitializeOngoingRun();
         }
 
-        private void ExportCurrentRun()
+        private void InitializeOngoingRun()
         {
-            if (CurrentState.CurrentPhase == TimerPhase.Running)
+            if (CurrentState.Run.First().Comparisons.TryGetValue(kComparisonName, out Model.Time firstSplitTime))
             {
+                if (firstSplitTime[CurrentState.CurrentTimingMethod] == null)
+                {
+                    return;
+                }
+
+                // Send a start to issue notifications, then fix state.
+                Model.Start();
+
+                foreach (ISegment segment in CurrentState.Run)
+                {
+                    if (segment.Comparisons.ContainsKey(kComparisonName))
+                    {
+                        segment.SplitTime = segment.Comparisons[kComparisonName];
+                    }
+
+                    if (segment.SplitTime[CurrentState.CurrentTimingMethod] != null)
+                    {
+                        CurrentState.CurrentSplitIndex++;
+                        CurrentState.AdjustedStartTime = TimeStamp.Now - segment.SplitTime[CurrentState.CurrentTimingMethod].GetValueOrDefault(TimeSpan.Zero);
+                    }
+                }
+
+                CurrentState.Run.AttemptCount--;
+                CurrentState.IsGameTimeInitialized = true;
+                CurrentState.Run.HasChanged = false;
+
                 Model.Pause();
             }
-
-            // Displays a SaveFileDialog so the user can save the Run as json file
-            SaveFileDialog saveFileDialog = new SaveFileDialog();
-            saveFileDialog.Filter = "json files (*.json)|*.json|All files (*.*)|*.*";
-            saveFileDialog.Title = "Save Your Run";
-            saveFileDialog.ShowDialog();
-
-            if (saveFileDialog.FileName == "") return;
-
-            SplitsStateWriter.SaveSplitsState(CurrentState, saveFileDialog.FileName);
-        }
-
-        private void ImportRun()
-        {
-            // Displays a OpenFileDialog so the user can save the Run as json file
-            OpenFileDialog openFileDialog = new OpenFileDialog();
-            openFileDialog.Filter = "json files (*.json)|*.json|All files (*.*)|*.*";
-            openFileDialog.Title = "Open Your Run";
-            openFileDialog.ShowDialog();
-
-            if (openFileDialog.FileName == "") return;
-
-            if (CurrentState.CurrentPhase != TimerPhase.NotRunning)
-            {
-                Model.Reset();
-            }
-
-            SplitStateImporter.ImportState(openFileDialog.FileName, CurrentState, Model);
-        }
-
-        static void ErrorCallback(Form form, Exception ex)
-        {
-            string requiredBits = Environment.Is64BitProcess ? "64" : "32";
-            MessageBox.Show(form, "Error appeared: " + ex.Message, "TimeAttackPause Component Error",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         public override Control GetSettingsControl(LayoutMode mode)
@@ -120,9 +96,27 @@ namespace LiveSplit.UI.Components
             LayoutMode mode)
         {
             CurrentState = state;
+
+            switch (CurrentState.CurrentPhase)
+            {
+                case TimerPhase.Running:
+                case TimerPhase.Paused:
+                    CurrentState.CurrentSplit.Comparisons["TimeAttackPause_Ongoing"] = CurrentState.CurrentTime;
+                    break;
+            }
         }
 
-        // I do not know what this is for.
-        public int GetSettingsHashCode() => Settings.GetSettingsHashCode();
+        private void state_OnReset(object sender, TimerPhase value)
+        {
+            CurrentState.Run.ForEach((ISegment segment) => {
+                segment.Comparisons.Remove(kComparisonName);
+            });
+            CurrentState.Run.HasChanged = true;
+        }
+
+        public override void Dispose()
+        {
+            CurrentState.OnReset -= state_OnReset;
+        }
     }
 }

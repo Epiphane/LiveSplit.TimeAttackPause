@@ -1,6 +1,9 @@
 ﻿using System;
 using LiveSplit.Model;
+using LiveSplit.TimeAttackPause.UI.Components;
 using LiveSplit.UI.Components;
+
+[assembly: ComponentFactory(typeof(TimeAttackPauseFactory))]
 
 namespace LiveSplit.TimeAttackPause.UI.Components
 {
